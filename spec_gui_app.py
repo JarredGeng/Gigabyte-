@@ -13,7 +13,6 @@ from selenium.webdriver.common.by import By
 # Path to geckodriver
 GECKODRIVER_PATH = "/usr/local/bin/geckodriver"
 
-# Database setup
 DB_FILE = "specs.db"
 
 def init_db():
@@ -77,32 +76,6 @@ def save_to_db(url, model_name, summary):
     conn.commit()
     conn.close()
 
-def export_records_to_excel():
-    conn = sqlite3.connect(DB_FILE)
-    df = pd.read_sql_query("""
-        SELECT
-            id,
-            date_scraped,
-            model_name,
-            url,
-            cpu_socket,
-            cpu_count,
-            max_tdp,
-            total_tdp,
-            memory_type,
-            dimm_slots,
-            power_supply,
-            rack_unit,
-            drive_bays,
-            m2_slots
-        FROM chassis_specs
-        ORDER BY id DESC
-    """, conn)
-    conn.close()
-    output_file = "saved_specs.xlsx"
-    df.to_excel(output_file, index=False)
-    messagebox.showinfo("Export Complete", f"✅ Records exported to {output_file}")
-
 def extract_visible_specs(url):
     options = Options()
     options.headless = False
@@ -132,9 +105,6 @@ def extract_visible_specs(url):
 
         if not text:
             text = driver.find_element(By.TAG_NAME, "body").text.strip()
-
-        with open("dump.html", "w", encoding="utf-8") as f:
-            f.write(driver.page_source)
 
     finally:
         driver.quit()
@@ -202,22 +172,20 @@ def parse_spec_text(text):
 def get_specs():
     url = url_entry.get().strip()
     if not url:
-        messagebox.showwarning("Missing URL", "Please paste a Gigabyte product URL.")
+        messagebox.showwarning("Missing URL", "Please paste a URL.")
         return
 
-    # Extract model name
-    model_match = re.search(r"/([^/#]+)(?:#|$)", url)
+    norm_url = url.split("#")[0].rstrip("/")
+    model_match = re.search(r"/([^/#]+)(?:#|$)", norm_url)
     model_name = model_match.group(1) if model_match else "Unknown"
 
-    # Check for duplicates
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
-    cursor.execute("SELECT * FROM chassis_specs WHERE url=?", (url,))
+    cursor.execute("SELECT * FROM chassis_specs WHERE url=?", (norm_url,))
     existing = cursor.fetchone()
     conn.close()
 
-    for row in output_tree.get_children():
-        output_tree.delete(row)
+    output_tree.delete(*output_tree.get_children())
 
     if existing:
         output_tree.insert("", "end", values=("Notice", "✅ Record already exists"))
@@ -236,11 +204,10 @@ def get_specs():
     root.update_idletasks()
 
     try:
-        raw_text = extract_visible_specs(url)
+        raw_text = extract_visible_specs(norm_url)
         summary = parse_spec_text(raw_text)
 
-        for row in output_tree.get_children():
-            output_tree.delete(row)
+        output_tree.delete(*output_tree.get_children())
 
         if not summary:
             output_tree.insert("", "end", values=("Error", "❌ No specs could be extracted."))
@@ -248,16 +215,15 @@ def get_specs():
             output_tree.insert("", "end", values=("Model Name", model_name))
             for k, v in summary.items():
                 output_tree.insert("", "end", values=(k, v))
-            save_to_db(url, model_name, summary)
-            output_tree.insert("", "end", values=("Saved", "✅ specs saved to database"))
+            save_to_db(norm_url, model_name, summary)
+            output_tree.insert("", "end", values=("Saved", "✅ Specs saved"))
     except Exception as e:
-        for row in output_tree.get_children():
-            output_tree.delete(row)
+        output_tree.delete(*output_tree.get_children())
         output_tree.insert("", "end", values=("Error", f"{e}"))
 
 def view_saved_records():
     records_window = tk.Toplevel(root)
-    records_window.title("Saved Chassis Records")
+    records_window.title("Saved Records")
     records_window.geometry("950x500")
 
     columns = (
@@ -265,17 +231,30 @@ def view_saved_records():
         "max_tdp", "memory_type", "dimm_slots", "power_supply", "rack_unit", "m2_slots"
     )
 
-    tree_frame = tk.Frame(records_window)
-    tree_frame.pack(fill=tk.BOTH, expand=True)
-
-    tree = ttk.Treeview(tree_frame, columns=columns, show="headings")
+    tree = ttk.Treeview(records_window, columns=columns, show="headings", selectmode="browse")
     for col in columns:
-        tree.heading(col, text=col.replace("_", " ").title())
-        tree.column(col, width=140, anchor=tk.W)
+        tree.heading(col, text=col.title())
+        tree.column(col, width=150)
 
     tree.pack(fill=tk.BOTH, expand=True)
 
-    export_btn = tk.Button(records_window, text="Export to Excel", command=export_records_to_excel)
+    def export_selected():
+        selected_item = tree.focus()
+        if not selected_item:
+            messagebox.showwarning("No Selection", "Please select a record first.")
+            return
+        record_values = tree.item(selected_item)["values"]
+
+        df = pd.DataFrame([record_values], columns=[
+            "ID", "Date", "Model Name", "URL", "CPU Socket", "CPU Count",
+            "Max TDP", "Memory Type", "DIMM Slots", "Power Supply",
+            "Rack Unit", "M.2 Slots"
+        ])
+        output_file = "selected_spec.xlsx"
+        df.to_excel(output_file, index=False)
+        messagebox.showinfo("Export Complete", f"Selected record exported to {output_file}")
+
+    export_btn = tk.Button(records_window, text="Export Selected to Excel", command=export_selected)
     export_btn.pack(pady=5)
 
     conn = sqlite3.connect(DB_FILE)
@@ -292,39 +271,30 @@ def view_saved_records():
     for row in rows:
         tree.insert("", tk.END, values=row)
 
-# Initialize database
+# Initialize DB
 init_db()
 
-# GUI Setup
 root = tk.Tk()
 root.title("Gigabyte Spec Extractor")
 root.geometry("750x500")
-root.configure(bg="black")
 
-tk.Label(root, text="Paste Gigabyte Product URL:", bg="black", fg="white").pack(pady=8)
+tk.Label(root, text="Paste URL:").pack(pady=5)
 url_entry = tk.Entry(root, width=80)
 url_entry.pack(pady=5)
 
-button_frame = tk.Frame(root, bg="black")
-button_frame.pack(pady=10)
-
-tk.Button(button_frame, text="Get Specs", command=get_specs).pack(side=tk.LEFT, padx=5)
-tk.Button(button_frame, text="View Saved Records", command=view_saved_records).pack(side=tk.LEFT, padx=5)
+btn_frame = tk.Frame(root)
+btn_frame.pack(pady=5)
+tk.Button(btn_frame, text="Get Specs", command=get_specs).pack(side=tk.LEFT, padx=5)
+tk.Button(btn_frame, text="View Saved Records", command=view_saved_records).pack(side=tk.LEFT, padx=5)
 
 tree_frame = tk.Frame(root)
 tree_frame.pack(pady=10, fill=tk.BOTH, expand=True)
-
-tree_scroll = tk.Scrollbar(tree_frame)
-tree_scroll.pack(side=tk.RIGHT, fill=tk.Y)
-
-output_tree = ttk.Treeview(tree_frame, yscrollcommand=tree_scroll.set, columns=("Spec", "Value"), show="headings")
+output_tree = ttk.Treeview(tree_frame, columns=("Spec", "Value"), show="headings")
 output_tree.heading("Spec", text="Specification")
 output_tree.heading("Value", text="Value")
-output_tree.column("Spec", width=250, anchor=tk.W)
-output_tree.column("Value", width=450, anchor=tk.W)
+output_tree.column("Spec", width=250)
+output_tree.column("Value", width=400)
 output_tree.pack(fill=tk.BOTH, expand=True)
-
-tree_scroll.config(command=output_tree.yview)
 
 root.mainloop()
 
